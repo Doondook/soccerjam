@@ -1,4 +1,4 @@
-soccerjam
+Soccerjam
 =========
 
-Counter-Strike 1.6 AMX Mod
+Counter-Strike Soccer Mod
