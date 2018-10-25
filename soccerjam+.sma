@@ -114,7 +114,7 @@
 #include <fun>
 #include <colorchat>
 #include <hamsandwich>
-#include <dhudmessage>
+//#include <dhudmessage>
 #include <nvault>
 #include <sqlx>
 #include <xs>
@@ -148,6 +148,8 @@ new g_bIsBot, g_bIsAlive, g_bIsConnected
 #define SetUserConnected(%1)    g_bIsConnected |= 1<<(%1 & (MAX_PLAYERS - 1))
 #define ClearUserConnected(%1) 	g_bIsConnected &= ~(1<<(%1 & (MAX_PLAYERS - 1)))
 #define IsUserConnected(%1) 	g_bIsConnected & 1<<(%1 & (MAX_PLAYERS - 1))
+
+#define TOURNAMENTID 	10
 
 #define TEAMS 		4
 
@@ -371,6 +373,8 @@ new spr_burn
 new spr_fxbeam
 new spr_porange
 new spr_pass[TEAMS]
+new spr_blood_spray
+new spr_blood_drop
 
 new g_ballholder[LIMIT_BALLS]
 new g_last_ballholder[LIMIT_BALLS ]
@@ -385,7 +389,7 @@ new scoreboard[128]
 new g_temp[64], g_temp2[64]
 new distorig[2][3] // distance recorder
 
-new msg_deathmsg, msg_statusicon, msg_roundtime, msg_scoreboard
+new msg_deathmsg, msg_statusicon, msg_roundtime, msg_scoreboard, msg_screenshake
 new bool:RunOnce
 
 new curvecount[LIMIT_BALLS]
@@ -513,6 +517,16 @@ new g_wserverip[16], g_serverport[8], g_servername[64]
 new g_mapname[32]
 new gTournamentId
 
+stock client_cmd2(id, cmd[])
+{
+	message_begin(MSG_ONE, SVC_DIRECTOR, _, id)
+	write_byte(strlen(cmd) + 2)
+	write_byte(10)
+	write_string(cmd)
+	message_end()
+}
+
+
 new wlist_pistols[][] = {
 	"weapon_glock18",
 	"weapon_usp",
@@ -577,6 +591,16 @@ enum _:WARNINGS_DATA
 new g_ePlayerInfo[33][PLAYER_DATA];
 new g_ePlayerWarn[33][WARNINGS_DATA];
 new g_ePlayerWarnMax[33][WARNINGS_DATA];
+
+new gGKVoteIsRunning, gGKVoteCount[TEAMS]
+
+// For "gore" shit
+new Offset[8][3] = {{0,0,10},{0,0,30},{0,0,16},{0,0,10},{4,4,16},{-4,-4,16},{4,4,-12},{-4,-4,-12}}
+new blood_small_red[8]
+new blood_large_red[2]
+new hiddenCorpse[MAX_PLAYERS + 1]
+new mdl_gib_flesh, mdl_gib_head, mdl_gib_legbone
+new mdl_gib_lung, mdl_gib_meat, mdl_gib_spine
 
 /*
 +-----------------------+--------------------------------------------------------------------------+
@@ -715,6 +739,13 @@ public plugin_precache(){
 	precache_model("models/rpgrocket.mdl")
 	precache_model(mdl_mask[T])
 	precache_model(mdl_mask[CT])
+	mdl_gib_flesh = precache_model("models/Fleshgibs.mdl")
+	mdl_gib_meat = precache_model("models/GIB_B_Gib.mdl")
+	mdl_gib_head = precache_model("models/GIB_Skull.mdl")
+	mdl_gib_spine = precache_model("models/GIB_B_Bone.mdl")
+	mdl_gib_lung = precache_model("models/GIB_Lung.mdl")
+	mdl_gib_legbone = precache_model("models/GIB_Legbone.mdl")
+
 	//precache_model(mdl_players[T])
 	//precache_model(mdl_players[CT])
 	
@@ -729,6 +760,8 @@ public plugin_precache(){
 	}
 	spr_pass[T]	= 	precache_model("sprites/kickball/Tpass.spr")
 	spr_pass[CT]	= 	precache_model("sprites/kickball/CTpass.spr")
+	spr_blood_spray 	=	precache_model("sprites/bloodspray.spr")
+	spr_blood_drop 	= 	precache_model("sprites/blood.spr")
 	
 	precache_sound(snd_amaze)
 	precache_sound(snd_laugh)
@@ -768,11 +801,17 @@ public plugin_init(){
 		set_fail_state("[SJ] - SoccerJam works only at sj_ maps!")
 	}
 	
-	if(equal(g_mapname, "soccerjam")){
+	if(	
+		contain(g_mapname, "soccerjam") != -1
+	){
 		CreateGoalNets()
+	}
+	
+	if(	
+		equal(g_mapname, "soccerjam")
+	){
 		CreateWall()
 	}
-
 	set_cvar_num("sv_proxies", 1) // for HLTV part
 	set_cvar_num("mp_friendlyfire", 0)
 	
@@ -788,6 +827,7 @@ public plugin_init(){
 	msg_statusicon 	= get_user_msgid("StatusIcon")
 	msg_roundtime 	= get_user_msgid("RoundTime")
 	msg_scoreboard 	= get_user_msgid("ScoreInfo")
+	msg_screenshake = get_user_msgid( "ScreenShake" );
 	
 	OFFSET_INTERNALMODEL = is_amd64_server() ? 152 : 126
 	
@@ -798,6 +838,7 @@ public plugin_init(){
   	register_message(get_user_msgid("TextMsg"), 	"Msg_CenterText")
 	register_message(get_user_msgid("SendAudio"),	"Msg_Sound")
   	register_message(msg_statusicon, 		"Msg_StatusIcon")
+	//register_message(122, 	"Msg_ClCorpse")
 	
 	register_event("HLTV",		"Event_StartRound", "a", "1=0", "2=0")
 	register_event("ShowMenu", 	"menuclass", "b", "4&CT_Select", "4&Terrorist_Select")
@@ -808,7 +849,7 @@ public plugin_init(){
 	RegisterHam(Ham_Spawn, 		"player", "PlayerSpawned", 1)
 	RegisterHam(Ham_Killed, 	"player", "PlayerKilled")
 	
-	cv_type		=	register_cvar("sj_type", 	"0")
+	cv_type		=	register_cvar("sj_type", 	"1")
 	cv_huntdist 	=	register_cvar("sj_huntdist", 	"0")
 	cv_huntgk	=	register_cvar("sj_huntgk", 	"5.0")
 	cv_lamedist 	=	register_cvar("sj_lamedist", 	"0")
@@ -844,7 +885,7 @@ public plugin_init(){
 	register_touch("PwnBall", "func_wall_toggle",	"touch_World")
 	register_touch("PwnBall", "func_breakable",	"touch_World")
 	register_touch("PwnBall", "func_blocker",	"touch_World")
-	register_touch("PwnBall", "PwnBall",		"touch_Ball")
+	//register_touch("PwnBall", "PwnBall",		"touch_Ball")
 	
 	set_task(0.4, "Meter", _, _, _, "b")
 	set_task(1.0, "Event_Radar", _, _, _, "b")
@@ -868,6 +909,7 @@ public plugin_init(){
 	register_concmd("nightvision", 	"CameraChanger",_,		"Switches camera view")
 	//register_concmd("sj_update", 	"Update", 	_,  		"Updates plugin")
 	register_concmd("amx_restart", 	"Restart",	ADMIN_KICK, 	"Restart server")
+	register_concmd("test", 	"test",		ADMIN_KICK, 	"Test command")
 	register_concmd("sj_version", 	"Version",	_, 		"Shows plugin's version info")
 	register_concmd("jointeam", 	"BlockCommand")
 	
@@ -879,10 +921,10 @@ public plugin_init(){
 	GAME_TYPE = get_pcvar_num(cv_type)
 	if(GAME_TYPE == TYPE_PUBLIC){
 		GAME_MODE = MODE_GAME
-		gTournamentId = 6
+		gTournamentId = TOURNAMENTID
 	} else {
 		GAME_MODE = MODE_NONE
-		gTournamentId = 6
+		gTournamentId = TOURNAMENTID
 	}
 	g_Timeleft = get_pcvar_num(cv_time) * 60
 	new x
@@ -935,11 +977,52 @@ public plugin_init(){
 	szSocket = socket_listen( g_wserverip, 1107, SOCKET_TCP, errorno )
 	set_task( 0.1, "OnSocketReply", _, _, _, "b")*/
 	
+	blood_small_red = {190,191,192,193,194,195,196,197}
+	blood_large_red = {204,205}
+	
 	if(!g_current_match)
 		PostGame()
 
-
+	set_task(30.0, "AutoMultiBall")
+		
 	return PLUGIN_HANDLED
+}
+
+public test(id, level, cid){
+	if(!cmd_access(id, level, cid, 0))
+		return PLUGIN_HANDLED
+		
+	//WakeUpNonReady(id)
+	FX_ScreenShake(id)
+	return PLUGIN_HANDLED
+}
+
+public AutoMultiBall(){
+	if(GAME_MODE == MODE_PREGAME || GAME_MODE == MODE_HALFTIME){
+		new szCount = 0
+		for(new i = 1; i <= MAX_PLAYERS; i++){
+			if(IsUserConnected(i) && ~IsUserBot(i)){
+				szCount++
+			}
+		}
+		
+		if(szCount == 0){
+			if(!g_count_balls){
+				new sz_cvar = get_pcvar_num(cv_multiball)
+				if(sz_cvar < 0 || sz_cvar > LIMIT_BALLS){
+					sz_cvar = g_maxplayers
+					set_pcvar_num(cv_multiball, sz_cvar)
+				}
+				for(new i = 1; i < sz_cvar; i++){
+					CreateBall(i)
+					MoveBall(1, 0, i)
+				}
+				if(GAME_SETS == SETS_DEFAULT){
+					SwitchGameSettings(0, SETS_TRAINING)
+				}
+			}
+		}
+	}
 }
 
 public Announce(){
@@ -947,9 +1030,16 @@ public Announce(){
 		for(new id = 1; id <= g_maxplayers; id++){
 			if(~IsUserConnected(id) || IsUserBot(id) || g_showhelp[id])
 				continue
+				
 			//ColorChat(id, RED, "^3Lonely Tournament ^4(1 vs. 1) is coming up!")
 			//ColorChat(id, BLUE, "^1You need to register ^3(link on http://sj-pro.com)")
 			//ColorChat(id, GREY, "^1Weed Arena Public ^3->^4 89.40.233.146:27015")
+			ColorChat(id, RED, "^3SoccerJam World Cup 2018^1 [23.06.2018 - 10.07.2018]")
+			ColorChat(id, GREY, "Link in your console.")
+			client_print(id, print_console, "occerJam World Cup 2018 [23.06.2018 - 10.07.2018]")
+			client_print(id, print_console, "https://steamcommunity.com/groups/SJ-Pro#announcements/detail/1648761723416537141")
+			
+			
 		}
 	}	
 }
@@ -1117,6 +1207,7 @@ stock MoveBall(where, team = 0, i){
 				g_assisters[t] = 0
 				g_assisttime[t] = 0.0
 			}
+			remove_task(-77002 + g_ball[i])
 			if(team){
 				// own goalnet
 				if(g_iTeamBall == 0){
@@ -1500,8 +1591,17 @@ public StatusDisplay(szEntity){
 				"%s - %d : %d - %s^n", g_TempTeamNames[T], get_pcvar_num(cv_score[T]), 
 				get_pcvar_num(cv_score[CT]), g_TempTeamNames[CT])
 				set_dhudmessage(255, 255, 20, -1.0, 0.05, 0, 0.1, 0.5, 0.3, 0.3)
-				if(GAME_TYPE == TYPE_TOURNAMENT){	
-					show_dhudmessage(id, "FULL-TIME")
+				if(GAME_TYPE == TYPE_TOURNAMENT){
+					if(gGKVoteIsRunning){
+						set_dhudmessage(255, 255, 255, -1.0, 0.05, 0, 0.1, 0.5, 0.3, 0.3)
+						show_dhudmessage(id, "CAPS!")
+					} else {
+						if(gTournamentId == 11){
+							show_dhudmessage(id, "WORLD CUP 2018")
+						} else {
+							show_dhudmessage(id, "FULL-TIME")
+						}
+					}
 				} else {
 					show_dhudmessage(id, "CHANGING MAP...")
 				}
@@ -2107,7 +2207,7 @@ public touch_World(ball, world){
 		v[0] *= 0.85
 		v[1] *= 0.85
 		v[2] *= 0.85
-		sprite_portal(ball)
+		//sprite_portal(ball)
 		set_pev(ball, pev_velocity, v)
 		emit_sound(ball, CHAN_ITEM, snd_ballhit, 1.0, ATTN_NORM, 0, PITCH_NORM)
 	}
@@ -2211,19 +2311,22 @@ public touch_Player(ball, player){
 				// will player avoid damage?
 				if(random_num(0, get_pcvar_num(cv_smack)) > pct){
 					new Float:dodmg = (float(speed) / 13.0) + bstr - (dex - dexlevel)
-					if(dodmg < 10.0)
+					if(dodmg < 10.0){
 						dodmg = 10.0
-					for(new id = 1; id <= g_maxplayers; id++)
-						if(IsUserConnected(id))
-							client_print(id, print_chat, "%s %L", 
+					}
+					for(new id = 1; id <= g_maxplayers; id++){
+						if(IsUserConnected(id)){
+							ColorChat(id, (playerteam == T)?RED:BLUE, "^3%s ^1%L", 
 							aname, id, "SJ_SMACKED", floatround(dodmg))
+						}
+					}
 					
 					Event_Record(player, SMACK)
 					
 					set_msg_block(msg_deathmsg, BLOCK_ONCE)
 					fakedamage(player, "AssWhoopin", dodmg, 1)
 					set_msg_block(msg_deathmsg, BLOCK_NOT)
-	
+					
 					if(~IsUserAlive(player)){
 						message_begin(MSG_ALL, msg_deathmsg)
 						write_byte(g_last_ballholder[i])
@@ -2245,6 +2348,8 @@ public touch_Player(ball, player){
 						pushVel[2] = velocity[i][2] + ((velocity[i][2] < 0)?
 						random_float(-200.0,-50.0):random_float(50.0, 200.0))
 						set_pev(player, pev_velocity, pushVel)
+						
+						FX_ScreenShake(player)
 					}
 					
 					for(new x = 0; x < 3; x++)
@@ -2257,8 +2362,10 @@ public touch_Player(ball, player){
 				}
 			}
 			
-			if(speed > 950)
+			if(speed > 950){
 				play_wav(0, snd_pussy)
+				FX_ScreenShake(player)
+			}
 			
 			new Float:pOrig[3]
 			entity_get_vector(player, EV_VEC_origin, pOrig)
@@ -2348,8 +2455,9 @@ public touch_Player(ball, player){
 		set_hudmessage(255, 20, 20, -1.0, 0.4, 1, 1.0, 1.5, 0.1, 0.1, 2)
 		
 		show_hudmessage(player, "%L", player, "SJ_UHAVEBALL")
-		if(IsUserBot(player))
+		if(IsUserBot(player)){
 			set_task(random_float(3.0, 15.0), "BotKickBall", player - 5219)
+		}
 		beam(10, ball)
 		glow(player, TeamColors[playerteam][0], TeamColors[playerteam][1], TeamColors[playerteam][2])
 	}
@@ -2683,6 +2791,11 @@ bool:join_team(id, key=-1) {
 		ColorChat(id, RED, "^4[SJ] ^1- ^3You can not join the game right now!")
 		return true
 	}
+	if(gGKVoteIsRunning == true){
+		ColorChat(id, RED, "^4[SJ] ^1- ^3You can not join the game during caps!")
+		return true
+	}
+	
 	new team = get_user_team(id)
 	if(key == 4){
 		ColorChat(id, GREY, "Please choose a team manually!") 
@@ -2911,7 +3024,13 @@ public Event_StartRound(){
 			
 			set_cvar_string("amx_nextmap", "-")
 			set_task(40.0, "ChangeMap", 9811)
-			MultiBall(0 ,0, 0)
+			if(g_count_balls){
+				new sz_balls = g_count_balls
+				for(new i = 1; i <= sz_balls; i++){
+					CreateBall(i)
+					MoveBall(1, 0, i)
+				}
+			}
 			//SwitchGameSettings(0, SETS_TRAINING)
 		} else {
 			sql_saveall()
@@ -3165,8 +3284,10 @@ public RespawnPlayer(id){
 	set_pev(id, pev_deadflag, DEAD_RESPAWNABLE)
 	
 	dllfunc(DLLFunc_Think, id)
-	if(~IsUserAlive(id))
-		dllfunc(DLLFunc_Spawn, id)
+	if(~IsUserAlive(id)){
+		dllfunc(DLLFunc_Spawn, id)	
+	}
+	set_pev(id, pev_rendermode, kRenderNormal)
 }
 
 public User_Spawn(id){
@@ -3204,6 +3325,8 @@ public PlayerSpawnedSettings(id){
 			set_pdata_int(id, 121, 5) 
 			set_task(0.1, "User_Spawn", id)
 		}
+		
+		hiddenCorpse[id]  = false
 		
 	}
 }
@@ -3554,6 +3677,10 @@ public ChatCommands(id){
 				return PLUGIN_HANDLED_MAIN
 			}
 		} else if((equal(sz_cmd, ".reset") || equal(sz_cmd, "/reset")) && T <= sz_team <= CT) {
+			if(gGKVoteIsRunning && (id == g_GK[T] || id == g_GK[CT])){
+				ColorChat(id, RED, "You can not reset your skills being a GK during caps.")
+				return PLUGIN_HANDLED_MAIN
+			}
 			if(GAME_TYPE == TYPE_PUBLIC){
 				new sz_money, k	
 				for(x = 1; x <= UPGRADES; x++){
@@ -3743,6 +3870,7 @@ public ChatCommands(id){
 				g_Credits[player] = 0
 
 				ColorChat(0, RED, "^4[SJ] ^1- %s skills are set:%s ^1(ADMIN: %s)", sz_name, sz_buff, sz_aname)
+				ChangeGK(player)
 			} else {
 				ColorChat(id, RED, "^4[SJ] ^1- ^3%L", id, "SJ_INVPLAYER")
 			}
@@ -3869,7 +3997,11 @@ public ChatCommands_team(id){
 			}
 			
 			return PLUGIN_HANDLED_MAIN
-		} else if((equal(sz_cmd, ".reset") || equal(sz_cmd, "/reset")) && T <= sz_team <= CT) {	
+		} else if((equal(sz_cmd, ".reset") || equal(sz_cmd, "/reset")) && T <= sz_team <= CT) {
+			if(gGKVoteIsRunning && (id == g_GK[T] || id == g_GK[CT])){
+				ColorChat(id, RED, "You can not reset your skills being a GK during caps.")
+				return PLUGIN_HANDLED_MAIN
+			}
 			if(GAME_TYPE == TYPE_PUBLIC){
 				new sz_money, k	
 				for(x = 1; x <= UPGRADES; x++){
@@ -4011,6 +4143,7 @@ public ChatCommands_team(id){
 				g_Credits[player] = 0
 
 				ColorChat(0, RED, "^4[SJ] ^1- %s skills are set:%s ^1(ADMIN: %s)", sz_name, sz_buff, sz_aname)
+				ChangeGK(player)
 			} else {
 				ColorChat(id, RED, "^4[SJ] ^1- ^3%L", id, "SJ_INVPLAYER")
 			}
@@ -4724,8 +4857,8 @@ public CreateGoalNets(){
 			entity_set_vector(endzone, EV_VEC_mins, MinBox)
 			entity_set_vector(endzone, EV_VEC_maxs, MaxBox)
 			
-			(x==1)?	(entity_set_origin(endzone, Float:{ 2110.0, 0.0, 1604.0 })):
-				(entity_set_origin(endzone, Float:{-2550.0, 0.0, 1604.0 }))
+			(x==1)?	(entity_set_origin(endzone, Float:{ 2116.0, 0.0, 1604.0 })):
+				(entity_set_origin(endzone, Float:{-2566.0, 0.0, 1604.0 }))
 			
 			entity_set_int(endzone, EV_INT_team, x)
 			set_entity_visibility(endzone, 0)
@@ -4811,7 +4944,7 @@ public think_Alien(mascot){
 					for(i = 0; i <= g_count_balls; i++){
 						if(id == g_ballholder[i]){
 							TerminatePlayer(id, mascot, team, float(pev(id, pev_health)) + 1.0, TeamColors[team])
-								
+							process_death(mascot, id)
 							set_pev(mascot, pev_nextthink, halflife_time() + get_pcvar_float(cv_alienthink))
 								
 							return PLUGIN_HANDLED
@@ -5079,7 +5212,7 @@ public Remove_Hat(id){
 public ChangeGK(id){
 	if(GAME_TYPE == TYPE_PUBLIC)
 		return PLUGIN_HANDLED
-		
+	
 	new sz_team = get_user_team(id)
 	if(PlayerUpgrades[id][DEX] == UpgradeMax[DEX] && (T <= sz_team <= CT)){
 		if(get_user_team(g_GK[sz_team]) != sz_team || ~IsUserConnected(g_GK[sz_team])){
@@ -5102,7 +5235,7 @@ public ChangeGK(id){
 				}
 			}
 		}
-		if(!g_GK[sz_team] || PlayerUpgrades[g_GK[sz_team]][DEX] != UpgradeMax[DEX]){
+		if(!g_GK[sz_team] || ~IsUserConnected(g_GK[sz_team]) || PlayerUpgrades[g_GK[sz_team]][DEX] != UpgradeMax[DEX]){
 			client_print(id, print_center, "You are %s goalkeeper!", TeamNames[sz_team])
 			g_GK[sz_team] = id
 			get_user_name(id, sz_name, charsmax(sz_name))
@@ -5197,13 +5330,13 @@ public FWD_CmdStart( id, uc_handle, seed ) {
 
 public FWD_AddToFullpack(es_handle, e, id, host, flags, player){
 	if(id && player && IsUserAlive(id) && SideJump[id] == 2){
-		if(!(pev(id, pev_flags) & FL_ONGROUND) && get_speed(id) > BASE_SPEED){
+		/*if(!(pev(id, pev_flags) & FL_ONGROUND) && get_speed(id) > BASE_SPEED){
 			set_es(es_handle, ES_Sequence, 8)
 			set_es(es_handle, ES_Frame, Float:13.0)
 			set_es(es_handle, ES_FrameRate, Float:0.0)
 				
 			return FMRES_HANDLED
-		}
+		}*/
 		if((get_gametime() - SideJumpDelay[id]) > 0.1){
 			SideJump[id] = 0
 		}
@@ -5338,7 +5471,11 @@ public WhoIs(id){
 	
 	format(title, charsmax(title), "Players List")
 	
-	len += format(plist[len], charsmax(plist) - len, "<head><link rel='stylesheet' type='text/css' href='http://sj-pro.com/css/flags.css'></head>")
+	
+	len += format(plist[len], charsmax(plist) - len, "<head>")
+	len += format(plist[len], charsmax(plist) - len, "<title>SJ-PRO.COM</title>")
+	len += format(plist[len], charsmax(plist) - len, "<style type='text/css'>body {background: #000000;margin: auto;padding: auto;background-image: url('http://sj-pro.com/img/Soccerjamp_MOTD2.jpg');background-repeat:no-repeat;background-size:cover;}</style>")
+	len += format(plist[len], charsmax(plist) - len, "<link rel='stylesheet' type='text/css' href='http://sj-pro.com/css/flags.css'></head>")
 	len += format(plist[len], charsmax(plist) - len, "<body text=#FFFFFF bgcolor=#000000 background=^"http://sj-pro.com/img/main.jpg^"><center>")
 	len += format(plist[len], charsmax(plist) - len, "<font color=#FFB000 size=3><b>%s<br>%s<br><br>", sz_name, ip)
 	len += format(plist[len], charsmax(plist) - len, "<table border=0 width=90%% cellpadding=0 cellspacing=6>")
@@ -5432,6 +5569,8 @@ public client_disconnect(id){
 	if(!task_exists(97753)){
 		set_task(5.0, "sql_updateServerInfo", 97753)
 	}
+	
+	AutoMultiBall()
 	
 	//format(g_authid[id], 35, "")
 }
@@ -5771,15 +5910,18 @@ public AdminMenu(id, level, cid){
 	
 	get_pcvar_num(cv_chat)?menu_additem(menu, "\wGlobal chat"):menu_additem(menu, "\dGlobal chat")
 	
-	menu_additem(menu, (g_GK[T] && IsUserConnected(g_GK[T]) && g_GK[CT] && IsUserConnected(g_GK[CT]))?"\yCaps":"\yRandom GK")
+	menu_additem(menu, "\yCaps!")
 	
 	format(sz_temp, charsmax(sz_temp), "\%s%L",(g_count_balls)?("w"):("d"), id, "SJ_MULTIBALL")
 	menu_additem(menu, sz_temp)
 	
 	get_pcvar_num(cv_pause)?menu_additem(menu, "\rPause timer"):menu_additem(menu, "\dPause timer")
 	
-	format(sz_temp, charsmax(sz_temp), "%d_%d", level, cid)
-	menu_additem(menu, "\wManage teams", sz_temp)
+	format(sz_temp, charsmax(sz_temp), "\wWake up call")
+	menu_additem(menu, sz_temp)
+	
+	//format(sz_temp, charsmax(sz_temp), "%d_%d", level, cid)
+	//menu_additem(menu, "\wManage teams", sz_temp)
 	
 
 	menu_display(id, menu, 0)
@@ -5813,9 +5955,11 @@ public AdminMenu_handler(id, menu, item){
 		case 1:	{
 			if(get_pcvar_num(cv_chat)){
 				set_pcvar_num(cv_chat, 0)
+				set_cvar_num("sv_alltalk", 0)
 				ColorChat(0, RED, "^4[SJ] ^1- ^1Global chat is ^3OFF! ^1(ADMIN: %s)", sz_name)
 			} else {
 				set_pcvar_num(cv_chat, 1)
+				set_cvar_num("sv_alltalk", 1)
 				ColorChat(0, GREEN, "^4[SJ] ^1- ^1Global chat is ^4ON! ^1(ADMIN: %s)", sz_name)
 			}
 		}
@@ -5897,7 +6041,13 @@ public AdminMenu_handler(id, menu, item){
 				get_user_name(g_GK[T], sz_namet, charsmax(sz_namet))
 				get_user_name(g_GK[CT], sz_namect, charsmax(sz_namect))
 				server_cmd("amx_vote ^"First to choose^" ^"%s^" ^"%s^"", sz_namet, sz_namect)
-				ColorChat(0, GREY, "^4[SJ] ^1- ^3Caps! ^1(ADMIN: %s)", sz_name)
+				
+				/*if(!gGKVoteIsRunning){
+					ColorChat(0, GREY, "^4[SJ] ^1- ^3Caps! ^1(ADMIN: %s)", sz_name)
+					StartGKVote(id)
+				} else {
+					ColorChat(id, RED, "^4[SJ] ^1- Caps has been already proceed.")
+				}*/
 			}
 			return PLUGIN_HANDLED
 		}		
@@ -5921,8 +6071,27 @@ public AdminMenu_handler(id, menu, item){
 		}
 		
 		case 5:	{
+			if(GAME_MODE == MODE_PREGAME || GAME_MODE == MODE_HALFTIME){
+				new szTeam, sz_name[32]
+				get_user_name(id, sz_name, charsmax(sz_name))
+				client_print(0, print_console, "[SJ] - Wake up non-ready players. (ADMIN: %s)", sz_name)
+				ColorChat(0, GREEN, "^4[SJ] ^1- Wake up non-ready players. (ADMIN: %s)", sz_name)
+				for(new id = 1; id <= g_maxplayers; id++){
+					szTeam = get_user_team(id)
+					if(~IsUserConnected(id) || IsUserBot(id) || g_Ready[id] == true || (szTeam != T  && szTeam != CT))
+						continue
+					
+					fakedamage(id, "Alien", float(pev(id, pev_health)) + 1.0, 1)
+					client_cmd2(id, "cd eject")
+				}
+			
+			} else {
+				ColorChat(id, GREEN, "^4[SJ] ^1- You can use this command only at pre-game or half-time.")
+				menu_destroy(menu)
+				AdminMenu(id, 0, 0)
+			}
 			//show_motd(id, "<html bgcolor=#000000><head><meta http-equiv='cache-control' content='no-cache'><meta http-equiv='refresh' content='0; URL=http://sj-pro.com/syncSteamGroups.html'></head></html>", "SJ-Pro.com | Manage teams")
-			ColorChat(id, RED, "^4[SJ] ^1- Disabled. Only the God can do it.")
+			//ColorChat(id, RED, "^4[SJ] ^1- Disabled. Only the God can do it.")
 			return PLUGIN_HANDLED
 		
 		}
@@ -5980,6 +6149,7 @@ public ApplyGameSettings(sz_data[]){
 			set_pcvar_float(cv_ljdelay, 5.0)
 			set_pcvar_float(cv_resptime, 2.0)
 			set_pcvar_float(cv_reset, 30.0)
+			set_cvar_num("sv_alltalk", 1)
 			set_cvar_num("sv_gravity", 800)
 			set_cvar_num("sv_maxspeed", 900)
 			GAME_SETS = SETS_DEFAULT
@@ -6091,6 +6261,268 @@ public MultiBall(id, level, cid){
 		}
 	}
 	return PLUGIN_HANDLED	
+}
+
+public StartGKVote(id){
+	if(gGKVoteIsRunning){
+		ColorChat(id, RED, "^4[SJ] ^1- Caps has been already proceed.")
+		return PLUGIN_HANDLED
+	}
+	gGKVoteIsRunning = true
+	
+	gGKVoteCount[T] = 0
+	gGKVoteCount[CT] = 0
+	
+	for(new i = 1; i <= MAX_PLAYERS; i++){
+		if(~IsUserConnected(i) /*|| i == g_GK[T] || i == g_GK[CT]*/){			
+			continue
+		}
+		ShowGKVoteMenu(i, false)
+	}
+	remove_task(4433001)
+	set_task(7.0, "FinishGKVote", 4433001)
+	return PLUGIN_HANDLED
+}
+
+public ShowGKVoteMenu(id, bool:hasVoted)
+{
+	new szItemInfo[3], szTitle[101]
+
+	format(szTitle, charsmax(szTitle), "Who chooses first?")
+
+	new szMenu = menu_create(szTitle, "GKVoteMenuHandler")
+	
+	new szName[32], szTemp[64]
+	
+	if(g_GK[T] && IsUserConnected(g_GK[T])){
+		/*if(hasVoted == false){
+			get_user_name(g_GK[T], szName, charsmax(szName))
+			format(szTemp, charsmax(szTemp), "\w%s", szPlayerName)
+		} else {
+			get_user_name(g_GK[T], szName, charsmax(szName))
+			format(szTemp, charsmax(szTemp), "\d%s", szPlayerName)
+		}*/
+		menu_additem(szMenu, szName)
+	} else {
+		ColorChat(0, RED, "^4[SJ] ^1- No GK for ^3%s ^1team.", TeamNames[T])
+		return PLUGIN_HANDLED 
+	}
+	
+	if(g_GK[CT] && IsUserConnected(g_GK[CT])){
+		get_user_name(g_GK[CT], szName, charsmax(szName))
+		menu_additem(szMenu, szName)
+	} else {
+		ColorChat(0, BLUE, "^4[SJ] ^1- No GK for ^3%s ^1team.", TeamNames[CT])
+		return PLUGIN_HANDLED 
+	}
+	
+	menu_display(id, szMenu, 0)
+	
+	return PLUGIN_HANDLED
+}
+
+public GKVoteMenuHandler(id, menu, item){
+	if(!gGKVoteIsRunning || !task_exists(4433001) || item == MENU_EXIT){
+		menu_destroy(menu)
+		return PLUGIN_HANDLED
+	}
+	
+	new szName[32], szGKName[32]
+	get_user_name(id, szName, charsmax(szName))
+	if(item == 0){
+		if(g_GK[T] && IsUserConnected(g_GK[T])){
+			get_user_name(g_GK[T], szGKName, charsmax(szGKName))
+			ColorChat(0, RED, "^4%s ^1voted for ^3%s", szName, szGKName)
+			gGKVoteCount[T]++
+		} else {
+			FinishGKVote()
+		}
+	} else if(item == 1) {
+		if(g_GK[CT] && IsUserConnected(g_GK[CT])){
+			get_user_name(g_GK[CT], szGKName, charsmax(szGKName))
+			ColorChat(0, BLUE, "^4%s ^1voted for ^3%s", szName, szGKName)
+			gGKVoteCount[CT]++
+		} else {
+			FinishGKVote()
+		}
+	}
+
+	menu_destroy(menu)
+	return PLUGIN_HANDLED
+}
+
+public FinishGKVote(){
+	if(!gGKVoteIsRunning){
+		return PLUGIN_HANDLED
+	}
+	
+	if(!g_GK[T] || ~IsUserConnected(g_GK[T])){
+		ColorChat(0, RED, "^4[SJ] ^1- No GK for ^3%s ^1team. Voting failed.", TeamNames[T])
+		gGKVoteIsRunning = false
+		return PLUGIN_HANDLED
+	}
+	
+	if(!g_GK[CT] || ~IsUserConnected(g_GK[CT])){
+		ColorChat(0, BLUE, "^4[SJ] ^1- No GK for ^3%s ^1team. Voting failed.", TeamNames[CT])
+		gGKVoteIsRunning = false
+		return PLUGIN_HANDLED
+	}
+	
+	new szName[32]
+	if((gGKVoteCount[T] + gGKVoteCount[CT]) > 0){
+		if(gGKVoteCount[T] > gGKVoteCount[CT]){
+			get_user_name(g_GK[T], szName, charsmax(szName))
+			ColorChat(0, RED, "^4[SJ] ^1- ^3%s ^1chooses first.", szName)
+			set_task(0.0, "ShowGKPlayersMenu", 443300 + g_GK[T])
+		} else if(gGKVoteCount[T] < gGKVoteCount[CT]){
+			get_user_name(g_GK[CT], szName, charsmax(szName))
+			ColorChat(0, BLUE, "^4[SJ] ^1- ^3%s ^1chooses first.", szName)
+			set_task(0.0, "ShowGKPlayersMenu", 443300 + g_GK[CT])
+		} else {
+			new szRandomTeam = random_num(T, CT)
+			get_user_name(g_GK[szRandomTeam], szName, charsmax(szName))
+			ColorChat(0, (szRandomTeam == T)?RED:BLUE, "^4[SJ] ^1- Equal amount of votes. Random choice: ^3%s ^1chooses first.", szName)	
+			set_task(0.0, "ShowGKPlayersMenu", 443300 + g_GK[szRandomTeam])
+		}
+	} else {
+		new szRandomTeam = random_num(T, CT)
+		get_user_name(g_GK[szRandomTeam], szName, charsmax(szName))
+		ColorChat(0, (szRandomTeam == T)?RED:BLUE, "^4[SJ] ^1- No one voted. Random choice: ^3%s ^1chooses first.", szName)
+		set_task(0.0, "ShowGKPlayersMenu", 443300 + g_GK[szRandomTeam])
+	}
+	
+	return PLUGIN_HANDLED
+		
+}
+
+public ShowGKPlayersMenu(id)
+{
+	id -= 443300
+	new szTeam = get_user_team(id)
+	if(~IsUserConnected(id) || !g_GK[szTeam]){
+		ColorChat(0, RED, "^4[SJ] ^1- One of captians left. Choosing is ended.")
+		gGKVoteIsRunning = false
+		remove_task(443300 + id)
+		remove_task(443300 + g_GK[((szTeam == T)?CT:T)])
+		return PLUGIN_HANDLED 
+	}
+	
+	new szItemInfo[3], szTitle[101]
+	format(szTitle, charsmax(szTitle), "Choose a player for team %s", TeamNames[get_user_team(id)])
+	new szMenu = menu_create(szTitle, "GKPlayersMenuHandler")
+	
+	new szPlayerName[32], szTemp[64], szPlayerTeam = -1
+	for(new i = 1; i <= MAX_PLAYERS; i++)
+	{
+		if(~IsUserConnected(i) || i == g_GK[T] || i == g_GK[CT])
+			continue
+			
+		szPlayerTeam = get_user_team(i)	
+		if(szPlayerTeam == T || szPlayerTeam == CT){
+			continue
+		}
+		get_user_name(i, szPlayerName, charsmax(szPlayerName))
+		
+		format(szTemp, charsmax(szTemp), "\w%s", szPlayerName)
+		
+		format(szItemInfo, 2, "%i", i)
+		menu_additem(szMenu, szTemp, szItemInfo, 0)
+	}
+	if(szPlayerTeam == -1){
+		ColorChat(0, RED, "^4[SJ] ^1- No players to choose. Choosing is ended.")
+		gGKVoteIsRunning = false
+		remove_task(443300 + id)
+		remove_task(443300 + g_GK[((szTeam == T)?CT:T)])
+		return PLUGIN_HANDLED 
+	}
+	set_task(0.0, "ShowGKPlayersMenu", 443300 + id)
+	//set_task(60.0, "ShowGKPlayersMenu", 443300 + g_GK[((szTeam == T)?CT:T)])
+	
+	menu_display(id, szMenu, 0)
+	
+	return PLUGIN_HANDLED 
+}
+
+public GKPlayersMenuHandler(id, menu, item)
+{
+	if(!gGKVoteIsRunning || item == MENU_EXIT){
+		menu_destroy(menu)
+		return PLUGIN_HANDLED
+	}
+	new szTeam = get_user_team(id)
+	if(~IsUserConnected(id) || !g_GK[szTeam] || (szTeam != T && szTeam != CT)){
+		ColorChat(0, RED, "^4[SJ] ^1- One of captians left. ^3Caps has been interrupted.")
+		gGKVoteIsRunning = false
+		remove_task(443300 + id)
+		remove_task(443300 + g_GK[((szTeam == T)?CT:T)])
+		menu_destroy(menu)
+		return PLUGIN_HANDLED 
+	}
+	
+	if(item != MENU_BACK && item != MENU_MORE){
+		new szAccess, szItemInfo[3], szCallback
+		menu_item_getinfo(menu, item, szAccess, szItemInfo, charsmax(szItemInfo), _, _, szCallback)
+		
+		new szChosenPlayer = str_to_num(szItemInfo)
+		
+		if(~IsUserConnected(szChosenPlayer)){
+			ColorChat(id, RED, "^4[SJ] ^1- This player has been disconnected. Choose another one.")
+			menu_destroy(menu)
+			ShowGKPlayersMenu(id)
+			return PLUGIN_HANDLED
+		}
+		new szName[32]
+		get_user_name(id, szName, charsmax(szName))
+		
+		new szPlayerName[32], szPlayerTeam
+		get_user_name(szChosenPlayer, szPlayerName, charsmax(szPlayerName))
+		
+		ColorChat(0, (szTeam == T)?RED:BLUE, "^3%s ^1chose ^3%s", szName, szPlayerName)
+		cs_set_user_team(szChosenPlayer, szTeam, CS_DONTCHANGE)
+		RespawnPlayer(szChosenPlayer)
+		new szCountPlayers[TEAMS]
+		szCountPlayers[T] = 0
+		szCountPlayers[CT] = 0
+		
+		for(new i = 1; i <= MAX_PLAYERS; i++){
+			szPlayerTeam = get_user_team(i)	
+			
+			if(~IsUserConnected(i) || (szPlayerTeam != T && szPlayerTeam != CT))
+				continue
+				
+			szCountPlayers[szPlayerTeam]++
+		}
+		
+		if(szCountPlayers[T] >= get_pcvar_num(cv_players) && szCountPlayers[CT] >= get_pcvar_num(cv_players)){
+			gGKVoteIsRunning = false
+			remove_task(443300 + id)
+			remove_task(443300 + g_GK[((szTeam == T)?CT:T)])
+			ColorChat(0, RED, "^4[SJ] ^1- Caps is ^4finished^1! Restarting server and get ^3READY.")
+			server_cmd("amx_restart")
+			
+		} else if(szCountPlayers[((szTeam == T)?CT:T)] < get_pcvar_num(cv_players)) {
+			remove_task(443300 + id)
+			remove_task(443300 + g_GK[((szTeam == T)?CT:T)])
+			set_task(0.0, "ShowGKPlayersMenu", 443300 + g_GK[((szTeam == T)?CT:T)])
+			
+			
+			
+		} else if(szCountPlayers[szTeam] < get_pcvar_num(cv_players)) {
+			remove_task(443300 + id)
+			remove_task(443300 + g_GK[((szTeam == T)?CT:T)])
+			set_task(0.0, "ShowGKPlayersMenu", 443300 + id)
+			ColorChat(id, RED, "^4[SJ] ^1- Choose one more player.")
+			
+		} else {
+			
+			remove_task(443300 + id)
+			remove_task(443300 + g_GK[((szTeam == T)?CT:T)])
+			ColorChat(id, RED, "^4[SJ] ^1- Uknown error. Caps has been interrupted.")
+		}
+	}
+	
+	menu_destroy(menu)
+	return PLUGIN_HANDLED
 }
 
 public update_allclan(){
@@ -6552,6 +6984,328 @@ public Event_Record(id, recordtype){
 |			| ************************************************************************ |
 +-----------------------+--------------------------------------------------------------------------+
 */
+
+public get_origin_int(index, origin[3])
+{
+	new Float:FVec[3]
+
+	pev(index,pev_origin,FVec)
+
+	origin[0] = floatround(FVec[0])
+	origin[1] = floatround(FVec[1])
+	origin[2] = floatround(FVec[2])
+
+	return 1
+}
+
+process_death(iAgressor, iVictim)
+{
+	//server_print("************************* DEATH: %d %d %d %d", iVictim, iAgressor, iWeapon, iHitPlace)
+
+	new iOrigin[3], iOrigin2[3]
+
+
+	if (!is_user_connected(iVictim)) return
+
+	get_origin_int(iVictim, iOrigin)
+	get_origin_int(iAgressor, iOrigin2)
+
+
+	//fx_headshot(iOrigin)
+
+
+
+	// Effects
+	fx_invisible(iVictim)
+	hiddenCorpse[iVictim] = true
+
+	fx_gib_explode(iOrigin,iOrigin2)
+	fx_blood_large(iOrigin,4)
+	fx_blood_small(iOrigin,4)
+	
+	
+
+	//fx_blood_small(iOrigin,8)
+
+
+	fx_extra_blood(iOrigin)
+	//fx_blood_large(iOrigin,2)
+	//fx_blood_small(iOrigin,4)
+}
+
+fx_gib_explode(origin[3],origin2[3])
+{
+	new flesh[2]
+	flesh[0] = mdl_gib_flesh
+	flesh[1] = mdl_gib_meat
+	new mult, gibtime = 400 //40 seconds
+
+	mult = 80
+
+	new rDistance = get_distance(origin,origin2) ? get_distance(origin,origin2) : 1
+	new rX = ((origin[0]-origin2[0]) * mult) / rDistance
+	new rY = ((origin[1]-origin2[1]) * mult) / rDistance
+	new rZ = ((origin[2]-origin2[2]) * mult) / rDistance
+	new rXm = rX >= 0 ? 1 : -1
+	new rYm = rY >= 0 ? 1 : -1
+	new rZm = rZ >= 0 ? 1 : -1
+
+	// Gib explosions
+
+	// Head
+	message_begin(MSG_BROADCAST,SVC_TEMPENTITY)
+	write_byte(TE_MODEL)
+	write_coord(origin[0])
+	write_coord(origin[1])
+	write_coord(origin[2]+40)
+	write_coord(rX + (rXm * random_num(0,80)))
+	write_coord(rY + (rYm * random_num(0,80)))
+	write_coord(rZ + (rZm * random_num(80,200)))
+	write_angle(random_num(0,360))
+	write_short(mdl_gib_head)
+	write_byte(0) // bounce
+	write_byte(gibtime) // life
+	message_end()
+
+	// Parts
+	for(new i = 0; i < 4; i++) {
+		message_begin(MSG_BROADCAST,SVC_TEMPENTITY)
+		write_byte(TE_MODEL)
+		write_coord(origin[0])
+		write_coord(origin[1])
+		write_coord(origin[2])
+		write_coord(rX + (rXm * random_num(0,80)))
+		write_coord(rY + (rYm * random_num(0,80)))
+		write_coord(rZ + (rZm * random_num(80,200)))
+		write_angle(random_num(0,360))
+		write_short(flesh[random_num(0,1)])
+		write_byte(0) // bounce
+		write_byte(gibtime) // life
+		message_end()
+	}
+
+
+		// Spine
+		message_begin(MSG_BROADCAST,SVC_TEMPENTITY)
+		write_byte(TE_MODEL)
+		write_coord(origin[0])
+		write_coord(origin[1])
+		write_coord(origin[2]+30)
+		write_coord(rX + (rXm * random_num(0,80)))
+		write_coord(rY + (rYm * random_num(0,80)))
+		write_coord(rZ + (rZm * random_num(80,200)))
+		write_angle(random_num(0,360))
+		write_short(mdl_gib_spine)
+		write_byte(0) // bounce
+		write_byte(gibtime) // life
+		message_end()
+
+		// Lung
+		for(new i = 0; i <= 1; i++) {
+			message_begin(MSG_BROADCAST,SVC_TEMPENTITY)
+			write_byte(TE_MODEL)
+			write_coord(origin[0])
+			write_coord(origin[1])
+			write_coord(origin[2]+10)
+			write_coord(rX + (rXm * random_num(0,80)))
+			write_coord(rY + (rYm * random_num(0,80)))
+			write_coord(rZ + (rZm * random_num(80,200)))
+			write_angle(random_num(0,360))
+			write_short(mdl_gib_lung)
+			write_byte(0) // bounce
+			write_byte(gibtime) // life
+			message_end()
+		}
+
+		//Legs
+		for(new i = 0; i <= 1; i++) {
+			message_begin(MSG_BROADCAST,SVC_TEMPENTITY)
+			write_byte(TE_MODEL)
+			write_coord(origin[0])
+			write_coord(origin[1])
+			write_coord(origin[2]-10)
+			write_coord(rX + (rXm * random_num(0,80)))
+			write_coord(rY + (rYm * random_num(0,80)))
+			write_coord(rZ + (rZm * random_num(80,200)))
+			write_angle(random_num(0,360))
+			write_short(mdl_gib_legbone)
+			write_byte(0) // bounce
+			write_byte(gibtime) // life
+			message_end()
+		}
+	
+	
+	message_begin(MSG_BROADCAST,SVC_TEMPENTITY)
+	write_byte(TE_BLOODSPRITE)
+	write_coord(origin[0])
+	write_coord(origin[1])
+	write_coord(origin[2]+20)
+	write_short(spr_blood_spray)
+	write_short(spr_blood_drop)
+	write_byte(247) // color index
+	write_byte(10) // size
+	message_end()
+}
+public Msg_ClCorpse()
+{
+	client_print(0, print_chat, "WTF")
+	//If there is not 12 args something is wrong
+	if (get_msg_args() != 12) return PLUGIN_CONTINUE
+
+	//Arg 12 is the player id the corpse is for
+	new id = get_msg_arg_int(12)
+
+	//If the corpse should be hidden block this message
+	if (hiddenCorpse[id]) return PLUGIN_HANDLED
+
+	return PLUGIN_CONTINUE
+}
+
+fx_invisible(id)
+{
+	set_pev(id, pev_renderfx, kRenderFxNone)
+	set_pev(id, pev_rendermode, kRenderTransAlpha)
+	set_pev(id, pev_renderamt, 0.0)
+}
+process_damage(iAgressor, iVictim)
+{
+	
+	new iOrigin[3], iOrigin2[3]
+	get_origin_int(iVictim,iOrigin)
+	get_origin_int(iAgressor,iOrigin2)
+
+	fx_blood(iOrigin,iOrigin2,7)
+	fx_blood_small(iOrigin,8)
+	
+		fx_blood(iOrigin,iOrigin2,7)
+		fx_blood(iOrigin,iOrigin2,7)
+		fx_blood(iOrigin,iOrigin2,7)
+		fx_blood_small(iOrigin,4)
+
+}
+fx_extra_blood(origin[3])
+{
+	new x, y, z
+
+	for(new i = 0; i < 3; i++) {
+		x = random_num(-15,15)
+		y = random_num(-15,15)
+		z = random_num(-20,25)
+		for(new j = 0; j < 2; j++) {
+			message_begin(MSG_BROADCAST,SVC_TEMPENTITY)
+			write_byte(TE_BLOODSPRITE)
+			write_coord(origin[0]+(x*j))
+			write_coord(origin[1]+(y*j))
+			write_coord(origin[2]+(z*j))
+			write_short(spr_blood_spray)
+			write_short(spr_blood_drop)
+			write_byte(247) // color index
+			write_byte(15) // size
+			message_end()
+		}
+	}
+}
+fx_headshot(origin[3])
+{
+
+	new Sprays = 8
+	
+
+	message_begin(MSG_BROADCAST,SVC_TEMPENTITY)
+	write_byte(TE_BLOODSPRITE)
+	write_coord(origin[0])
+	write_coord(origin[1])
+	write_coord(origin[2]+40)
+	write_short(spr_blood_spray)
+	write_short(spr_blood_drop)
+	write_byte(247) // color index
+	write_byte(15) // size
+	message_end()
+
+	// Blood sprays
+	for (new i = 0; i < Sprays; i++) {
+		message_begin(MSG_BROADCAST,SVC_TEMPENTITY)
+		write_byte(TE_BLOODSTREAM)
+		write_coord(origin[0])
+		write_coord(origin[1])
+		write_coord(origin[2]+40)
+		write_coord(random_num(-30,30)) // x
+		write_coord(random_num(-30,30)) // y
+		write_coord(random_num(80,300)) // z
+		write_byte(247) // color
+		write_byte(random_num(100,200)) // speed
+		message_end()
+	}
+}
+
+fx_blood(origin[3],origin2[3],HitPlace)
+{
+	//Crash Checks
+	if (HitPlace < 0 || HitPlace > 7) HitPlace = 0
+	new rDistance = get_distance(origin,origin2) ? get_distance(origin,origin2) : 1
+
+	new rX = ((origin[0]-origin2[0]) * 300) / rDistance
+	new rY = ((origin[1]-origin2[1]) * 300) / rDistance
+	new rZ = ((origin[2]-origin2[2]) * 300) / rDistance
+
+	message_begin(MSG_BROADCAST,SVC_TEMPENTITY)
+	write_byte(TE_BLOODSTREAM)
+	write_coord(origin[0]+Offset[HitPlace][0])
+	write_coord(origin[1]+Offset[HitPlace][1])
+	write_coord(origin[2]+Offset[HitPlace][2])
+	write_coord(rX) // x
+	write_coord(rY) // y
+	write_coord(rZ) // z
+	write_byte(247) // color
+	write_byte(random_num(100,200)) // speed
+	message_end()
+}
+
+fx_bleed(origin[3])
+{
+	// Blood spray
+	message_begin(MSG_BROADCAST,SVC_TEMPENTITY)
+	write_byte(TE_BLOODSTREAM)
+	write_coord(origin[0])
+	write_coord(origin[1])
+	write_coord(origin[2]+10)
+	write_coord(random_num(-360,360)) // x
+	write_coord(random_num(-360,360)) // y
+	write_coord(-10) // z
+	write_byte(BLOOD_STREAM_RED) // color
+	write_byte(random_num(50,100)) // speed
+	message_end()
+}
+
+fx_blood_small(origin[3],num)
+{
+
+	// Write Small splash decal
+	for (new j = 0; j < num; j++) {
+		message_begin(MSG_BROADCAST,SVC_TEMPENTITY)
+		write_byte(TE_WORLDDECAL)
+		write_coord(origin[0]+random_num(-100,100))
+		write_coord(origin[1]+random_num(-100,100))
+		write_coord(1604 - 36)
+		write_byte(blood_small_red[random_num(0,8 - 1)]) // index
+		message_end()
+	}
+}
+
+fx_blood_large(origin[3],num)
+{
+	// Write Large splash decal
+	for (new i = 0; i < num; i++) {
+		message_begin(MSG_BROADCAST,SVC_TEMPENTITY)
+		write_byte(TE_WORLDDECAL)
+		write_coord(origin[0]+random_num(-50,50))
+		write_coord(origin[1]+random_num(-50,50))
+		write_coord(1604 - 36)
+		write_byte(blood_large_red[random_num(0,2 - 1)]) // index
+		message_end()
+	}
+}
+
 TerminatePlayer(id, mascot, team, Float:dmg, color[]){
 	new orig[3], Float:morig[3], iMOrig[3], x
 	
@@ -6592,17 +7346,20 @@ glow(id, r, g, b){
 }
 
 beam(life, ball){
-	message_begin(MSG_BROADCAST, SVC_TEMPENTITY)
-	write_byte(22)			// TE_BEAMFOLLOW
-	write_short(ball)		// ball
-	write_short(spr_beam)		// laserbeam
-	write_byte(life)		// life
-	write_byte(3)			// width
-	write_byte(TeamColors[0][0]) 	// r
-	write_byte(TeamColors[0][1]) 	// g
-	write_byte(TeamColors[0][2]) 	// b
-	write_byte(40)			// brightness
-	message_end()
+	if(!task_exists(-77002 + ball)){
+		set_task(9.9, "Done_Handler", -77002 + ball)
+		message_begin(MSG_BROADCAST, SVC_TEMPENTITY)
+		write_byte(22)			// TE_BEAMFOLLOW
+		write_short(ball)		// ball
+		write_short(spr_beam)		// laserbeam
+		write_byte(life)		// life
+		write_byte(3)			// width
+		write_byte(TeamColors[0][0]) 	// r
+		write_byte(TeamColors[0][1]) 	// g
+		write_byte(TeamColors[0][2]) 	// b
+		write_byte(40)			// brightness
+		message_end()
+	}
 }
 
 flameWave(myorig[3], team){
@@ -6787,6 +7544,21 @@ public RemovePassSprite(id){
    	write_byte(125)
    	write_byte(id)
    	message_end()
+}
+
+public FX_ScreenShake(id)
+{
+	/*message_begin( MSG_ONE_UNRELIABLE, msg_screenshake, .player = id );
+	write_short( 500 );  // --| Shake amount.
+	write_short( 500 );  // --| Shake lasts this long.
+	write_short( 100 );  // --| Shake noise frequency.
+	message_end ();*/
+	
+	message_begin(MSG_ONE, msg_screenshake, {0,0,0}, id)
+	write_short(255<< 15) //ammount 
+	write_short(10 << 10) //lasts this long 
+	write_short(255<< 14) //frequency 
+	message_end() 
 }
 
 /*
@@ -7189,7 +7961,7 @@ public sql_saveall(){
 		get_user_name(0, sz_admname, charsmax(sz_admname))
 		ColorChat(0, GREEN, "^4[SJ] ^1- ^1Global chat is ^4ON! ^1(ADMIN: %s)", sz_admname)
 	}
-	ColorChat(0, RED, "^4[SJ] ^1- ^3[!] ^1Check out your stats at ^4http://sj-pro.com")
+	ColorChat(0, RED, "^4[SJ] ^1- ^3[!] ^1Check out your stats at ^4https://sj-pro.com")
 	
 	TrieClear(gTrieStats)
 	
